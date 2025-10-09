@@ -1,5 +1,6 @@
 # Minimal requirements for basic functionality
 streamlit
+python-dotenv
 pandas
 scikit-learn
 nltk
@@ -8,3 +9,4 @@ python-docx
 numpy
 plotly
 openai
+
