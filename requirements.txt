@@ -9,4 +9,7 @@ python-docx
 numpy
 plotly
 openai
+pytesseract
+pillow
+pdf2image
 
