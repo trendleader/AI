@@ -12,4 +12,6 @@ openai
 pytesseract
 pillow
 pdf2image
+requests
+
 
