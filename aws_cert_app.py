@@ -9,7 +9,7 @@ from questions_db import QUESTIONS_DATABASE, TOPICS
 
 # Try to load from .env file if it exists, but don't require it
 try:
-    load_dotenv("C:\\Users\\pjone\\OneDrive\\Desktop\\NewPython\\test.env")
+    load_dotenv()
 except:
     pass
 
