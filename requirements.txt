@@ -13,5 +13,7 @@ pytesseract
 pillow
 pdf2image
 requests
+openpyxl
+
 
 
