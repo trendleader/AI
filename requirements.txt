@@ -1,5 +1,6 @@
 # Minimal requirements for basic functionality
 streamlit
+huggingface-hub
 python-dotenv
 pandas
 scikit-learn
@@ -14,6 +15,7 @@ pillow
 pdf2image
 requests
 openpyxl
+
 
 
 
