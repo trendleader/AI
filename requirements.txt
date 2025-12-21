@@ -15,6 +15,11 @@ pillow
 pdf2image
 requests
 openpyxl
+beautifulsoup4
+spacy
+lxml
+
+
 
 
 
