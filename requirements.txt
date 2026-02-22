@@ -2,7 +2,6 @@
 streamlit
 huggingface-hub
 python-dotenv
-pydub
 pandas
 scikit-learn
 nltk
@@ -19,6 +18,7 @@ openpyxl
 beautifulsoup4
 spacy
 lxml
+
 
 
 
