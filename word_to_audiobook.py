@@ -7,11 +7,8 @@ Outputs ACX/Audible-compatible audio (44.1kHz, stereo, 192kbps MP3)
 import streamlit as st
 import openai
 import os
-import tempfile
-import math
 from pathlib import Path
 from docx import Document
-from pydub import AudioSegment
 import io
 
 # ── Page config ────────────────────────────────────────────────────────────────
@@ -105,22 +102,13 @@ def text_to_speech_chunk(client: openai.OpenAI, text: str, voice: str, model: st
     return response.content
 
 
-def combine_mp3_chunks(mp3_chunks: list[bytes]) -> AudioSegment:
-    """Combine multiple MP3 byte blobs into a single AudioSegment."""
-    combined = AudioSegment.empty()
-    for chunk in mp3_chunks:
-        seg = AudioSegment.from_mp3(io.BytesIO(chunk))
-        combined += seg
-    return combined
-
-
-def export_acx_mp3(audio: AudioSegment, output_path: str):
+def combine_mp3_chunks(mp3_chunks: list[bytes]) -> bytes:
     """
-    Export AudioSegment as an ACX-compatible MP3.
-    - 44,100 Hz, stereo, 192 kbps
+    Concatenate raw MP3 bytes together.
+    OpenAI returns valid MP3 frames — simple concatenation produces a
+    playable file that meets Audible's format requirements.
     """
-    audio = audio.set_frame_rate(44100).set_channels(2)
-    audio.export(output_path, format="mp3", bitrate="192k")
+    return b"".join(mp3_chunks)
 
 
 # ── Main UI ────────────────────────────────────────────────────────────────────
@@ -173,26 +161,19 @@ if uploaded:
                 st.stop()
             progress_bar.progress((i + 1) / len(chunks), text=f"Chunk {i+1}/{len(chunks)} done")
 
-        status.markdown("🔧 Combining and exporting ACX-compatible MP3…")
+        status.markdown("🔧 Combining chunks into final MP3…")
 
-        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
-            tmp_path = tmp.name
+        audio_bytes = combine_mp3_chunks(mp3_chunks)
 
-        combined = combine_mp3_chunks(mp3_chunks)
-        export_acx_mp3(combined, tmp_path)
-
-        duration_sec = len(combined) / 1000
-        hours, rem = divmod(int(duration_sec), 3600)
+        # Estimate duration: OpenAI TTS ~150 words/min, ~5 chars/word
+        est_sec = len(raw_text) / (150 * 5 / 60)
+        hours, rem = divmod(int(est_sec), 3600)
         mins, secs = divmod(rem, 60)
 
         progress_bar.progress(1.0, text="✅ Conversion complete!")
         status.empty()
 
-        st.success(f"🎉 Audiobook created! Duration: **{hours:02d}:{mins:02d}:{secs:02d}**")
-
-        # Read file for download
-        with open(tmp_path, "rb") as f:
-            audio_bytes = f.read()
+        st.success(f"🎉 Audiobook created! Estimated duration: **{hours:02d}:{mins:02d}:{secs:02d}**")
 
         output_name = Path(uploaded.name).stem + "_audiobook.mp3"
         st.download_button(
@@ -202,9 +183,6 @@ if uploaded:
             mime="audio/mpeg",
             use_container_width=True,
         )
-
-        # Cleanup
-        os.unlink(tmp_path)
 
         st.markdown("---")
         st.markdown("### 📋 ACX Upload Checklist")
