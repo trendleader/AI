@@ -1,4 +1,5 @@
 # Minimal requirements for basic functionality
+anthropic
 streamlit
 huggingface-hub
 python-dotenv
