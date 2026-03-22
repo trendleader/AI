@@ -6,6 +6,7 @@ python-dotenv
 pandas
 scikit-learn
 nltk
+pdfplumber
 PyPDF2
 python-docx
 numpy
