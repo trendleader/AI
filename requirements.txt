@@ -2,7 +2,24 @@
 anthropic
 streamlit
 huggingface-hub
+huggingface_hub
 python-dotenv
+# RAG pipeline
+langchain
+langchain-community
+langchain-text-splitters
+langchain-huggingface
+langchain-chroma
+chromadb
+unstructured
+unstructured[docx]
+sentence-transformers
+# Voice assistant
+gtts
+SpeechRecognition
+pyttsx3
+langdetect
+pyaudio
 pandas
 scikit-learn
 nltk
