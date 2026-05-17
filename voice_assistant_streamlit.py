@@ -212,11 +212,17 @@ def get_ai_response(
 def append_to_log(role: str, content: str, personality: str) -> None:
     existing = []
     if LOG_PATH.exists():
-        try:
-            with LOG_PATH.open("r", encoding="utf-8") as f:
-                existing = json.load(f)
-        except json.JSONDecodeError:
-            pass
+        # Try UTF-8 first; fall back to latin-1 for files written by Windows apps
+        # (byte 0x92 = Windows-1252 curly apostrophe, invalid in strict UTF-8)
+        for enc in ("utf-8", "latin-1"):
+            try:
+                with LOG_PATH.open("r", encoding=enc) as f:
+                    existing = json.load(f)
+                break
+            except UnicodeDecodeError:
+                continue
+            except json.JSONDecodeError:
+                break
     existing.append({
         "role": role,
         "content": content,
