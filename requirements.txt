@@ -14,6 +14,12 @@ chromadb
 unstructured
 unstructured[docx]
 sentence-transformers
+# Voice assistant
+gtts
+SpeechRecognition
+pyttsx3
+langdetect
+pyaudio
 pandas
 scikit-learn
 nltk
