@@ -117,13 +117,37 @@ class TFIDFVectorStore:
         return [(self.chunks[i], float(scores[i])) for i in top_idx]
 
 # ── Build / cache knowledge base ──────────────────────────────────────────────
+def _pdf_fingerprint() -> str:
+    """Hash the PDF files so the cache auto-invalidates if they change."""
+    h = hashlib.md5()
+    for path in sorted(PDF_PATHS.values()):
+        try:
+            h.update(Path(path).read_bytes())
+        except FileNotFoundError:
+            h.update(path.encode())
+    return h.hexdigest()[:12]
+
+
 @st.cache_resource(show_spinner="Loading & indexing documents…")
-def build_knowledge_base():
-    # Check if we have a pickled version
+def build_knowledge_base(_fingerprint: str = ""):  # fingerprint busts stale cache
+    # Verify PDFs exist before doing anything
+    for name, path in PDF_PATHS.items():
+        if not Path(path).exists():
+            raise FileNotFoundError(
+                f"PDF not found: '{path}'\n"
+                f"Expected at: {path}\n"
+                f"Make sure the docs/ folder is present next to the app."
+            )
+
+    # Use pickled index if it exists and was built with same PDFs
     if CACHE_PATH.exists():
-        with open(CACHE_PATH, "rb") as f:
-            data = pickle.load(f)
-        return TFIDFVectorStore.__new__(TFIDFVectorStore), data["chunks"], data
+        try:
+            with open(CACHE_PATH, "rb") as f:
+                data = pickle.load(f)
+            if data.get("fingerprint") == _fingerprint:
+                return TFIDFVectorStore.__new__(TFIDFVectorStore), data["chunks"], data
+        except Exception:
+            pass  # corrupt cache — rebuild below
 
     all_docs: list[Document] = []
     for name, path in PDF_PATHS.items():
@@ -139,10 +163,11 @@ def build_knowledge_base():
     vs = TFIDFVectorStore(chunks)
 
     cache = {
-        "chunks": chunks,
-        "texts": vs.texts,
-        "vectorizer": vs.vectorizer,
-        "matrix": vs.matrix,
+        "fingerprint": _fingerprint,
+        "chunks":      chunks,
+        "texts":       vs.texts,
+        "vectorizer":  vs.vectorizer,
+        "matrix":      vs.matrix,
     }
     with open(CACHE_PATH, "wb") as f:
         pickle.dump(cache, f)
@@ -430,11 +455,15 @@ def main():
 
     # ── Load resources ────────────────────────────────────────────────────────
     try:
-        vs_obj, chunks, cache = build_knowledge_base()
+        fp = _pdf_fingerprint()
+        vs_obj, chunks, cache = build_knowledge_base(_fingerprint=fp)
         # Restore TFIDFVectorStore properly from cache on Streamlit rerun
         if not hasattr(vs_obj, "vectorizer"):
             vs_obj = restore_vs_from_cache(cache)
         agent = AgentRAG(vs_obj)
+    except FileNotFoundError as e:
+        st.error(str(e))
+        st.stop()
     except Exception as e:
         st.error(f"Failed to initialise knowledge base: {e}")
         st.stop()
