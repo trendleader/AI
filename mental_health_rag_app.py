@@ -66,15 +66,14 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
+_HERE = Path(__file__).parent
 PDF_PATHS = {
     "How to Manage Anxiety as a Black Woman":
-        "/root/.claude/uploads/1317c8f6-a1b7-5ba2-bbe8-c9a847284328/"
-        "055c7ab4-HowtoManageAnxietyasaBlackWoman.pdf",
+        str(_HERE / "docs" / "anxiety_black_women.pdf"),
     "Postpartum Mental Health and Black Women":
-        "/root/.claude/uploads/1317c8f6-a1b7-5ba2-bbe8-c9a847284328/"
-        "e8f10a92-Postpartum.pdf",
+        str(_HERE / "docs" / "postpartum_black_women.pdf"),
 }
-CACHE_PATH = Path("/home/user/AI/.rag_cache_mental_health.pkl")
+CACHE_PATH = _HERE / ".rag_cache_mental_health.pkl"
 
 CHUNK_SIZE    = 500
 CHUNK_OVERLAP = 60
