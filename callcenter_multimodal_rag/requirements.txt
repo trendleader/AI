@@ -1,0 +1,20 @@
+streamlit
+anthropic
+python-dotenv
+
+# Document ingestion (PDF, Word, text)
+langchain
+langchain-community
+langchain-text-splitters
+langchain-huggingface
+langchain-chroma
+langchain-core
+chromadb
+sentence-transformers
+pypdf
+unstructured
+unstructured[docx]
+python-docx
+
+# Audio ingestion (call recordings)
+faster-whisper
