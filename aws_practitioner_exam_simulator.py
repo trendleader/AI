@@ -7,8 +7,12 @@ scored results report broken down by exam domain.
 """
 
 import copy
+import os
 import random
+import smtplib
 import time
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 
 import streamlit as st
 
@@ -18,6 +22,9 @@ import streamlit as st
 
 EXAM_DURATION_SECONDS = 90 * 60
 PASS_THRESHOLD_PERCENT = 70  # approximate; AWS's real cut score is a scaled 700/1000
+RESULTS_RECIPIENT_EMAIL = "philjones820@gmail.com"
+SMTP_HOST = "smtp.gmail.com"
+SMTP_PORT = 465
 
 DOMAIN_WEIGHTS = {
     "Cloud Concepts": 24,
@@ -852,6 +859,8 @@ def init_state():
         "start_time": None,
         "confirm_submit": False,
         "attempts": 0,
+        "email_status": None,
+        "reveal_results": False,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -881,6 +890,8 @@ def retake_exam():
     st.session_state.current_q = 0
     st.session_state.start_time = None
     st.session_state.confirm_submit = False
+    st.session_state.email_status = None
+    st.session_state.reveal_results = False
 
 
 def elapsed_seconds():
@@ -891,6 +902,169 @@ def elapsed_seconds():
 
 def remaining_seconds():
     return max(0, EXAM_DURATION_SECONDS - elapsed_seconds())
+
+
+# ─────────────────────────────────────────────────────────────
+# EMAIL DELIVERY
+# ─────────────────────────────────────────────────────────────
+
+
+def get_email_credentials():
+    """Read sender credentials from st.secrets, falling back to env vars."""
+    try:
+        section = st.secrets.get("email", {})
+    except Exception:
+        section = {}
+    sender = section.get("address") or os.environ.get("EMAIL_ADDRESS")
+    app_password = section.get("app_password") or os.environ.get("EMAIL_APP_PASSWORD")
+    return sender, app_password
+
+
+def score_exam(questions, answers):
+    total = len(questions)
+    correct = sum(1 for i, q in enumerate(questions) if answers.get(i) == q["answer"])
+    percent = round((correct / total) * 100, 1)
+    passed = percent >= PASS_THRESHOLD_PERCENT
+
+    domain_stats = {d: {"correct": 0, "total": 0} for d in DOMAIN_WEIGHTS}
+    for i, q in enumerate(questions):
+        d = q["domain"]
+        domain_stats[d]["total"] += 1
+        if answers.get(i) == q["answer"]:
+            domain_stats[d]["correct"] += 1
+
+    return {
+        "total": total,
+        "correct": correct,
+        "percent": percent,
+        "passed": passed,
+        "domain_stats": domain_stats,
+    }
+
+
+def build_results_text(score, time_taken, questions, answers):
+    lines = [
+        "AWS CLOUD PRACTITIONER (CLF-C02) — EXAM RESULTS",
+        "=" * 50,
+        f"Result: {'PASS' if score['passed'] else 'FAIL'}",
+        f"Score: {score['correct']}/{score['total']} ({score['percent']}%)",
+        f"Time used: {format_mmss(time_taken)}",
+        "",
+        "Score by domain:",
+    ]
+    for domain, stats in score["domain_stats"].items():
+        pct = (stats["correct"] / stats["total"] * 100) if stats["total"] else 0
+        lines.append(f"  - {domain}: {stats['correct']}/{stats['total']} ({pct:.0f}%)")
+
+    lines.append("")
+    lines.append("Answer review:")
+    for i, q in enumerate(questions):
+        user_answer = answers.get(i)
+        is_correct = user_answer == q["answer"]
+        status = "CORRECT" if is_correct else ("UNANSWERED" if user_answer is None else "INCORRECT")
+        lines.append("")
+        lines.append(f"Q{i + 1} [{q['domain']}] — {status}")
+        lines.append(q["question"])
+        if user_answer is not None:
+            lines.append(f"  Your answer: {q['options'][user_answer]}")
+        lines.append(f"  Correct answer: {q['options'][q['answer']]}")
+        lines.append(f"  Explanation: {q['explanation']}")
+
+    return "\n".join(lines)
+
+
+def build_results_html(score, time_taken, questions, answers):
+    status_color = "#16a34a" if score["passed"] else "#dc2626"
+    status_text = "PASS" if score["passed"] else "FAIL"
+
+    domain_rows = ""
+    for domain, stats in score["domain_stats"].items():
+        pct = (stats["correct"] / stats["total"] * 100) if stats["total"] else 0
+        domain_rows += (
+            f'<tr><td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;">{domain}</td>'
+            f'<td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;text-align:right;">'
+            f"{stats['correct']}/{stats['total']} ({pct:.0f}%)</td></tr>"
+        )
+
+    review_rows = ""
+    for i, q in enumerate(questions):
+        user_answer = answers.get(i)
+        is_correct = user_answer == q["answer"]
+        is_unanswered = user_answer is None
+        icon = "✅" if is_correct else ("⬜" if is_unanswered else "❌")
+        your_answer_html = (
+            f'<p style="margin:4px 0;color:#dc2626;"><strong>Your answer:</strong> {q["options"][user_answer]}</p>'
+            if user_answer is not None and not is_correct
+            else ""
+        )
+        if is_unanswered:
+            your_answer_html = '<p style="margin:4px 0;color:#b45309;"><strong>You did not answer this question.</strong></p>'
+
+        review_rows += f"""
+        <div style="border:1px solid #e5e7eb;border-radius:8px;padding:14px 16px;margin-bottom:10px;">
+            <p style="margin:0 0 6px 0;font-weight:600;">{icon} Q{i + 1} · {q['domain']}</p>
+            <p style="margin:0 0 8px 0;">{q['question']}</p>
+            {your_answer_html}
+            <p style="margin:4px 0;color:#16a34a;"><strong>Correct answer:</strong> {q['options'][q['answer']]}</p>
+            <p style="margin:6px 0 0 0;color:#4b5563;font-size:0.9em;">💡 {q['explanation']}</p>
+        </div>
+        """
+
+    return f"""
+    <html>
+    <body style="font-family:Arial,Helvetica,sans-serif;color:#111827;max-width:720px;margin:0 auto;">
+        <div style="background:#232F3E;padding:20px 24px;border-radius:8px 8px 0 0;">
+            <h1 style="color:#FF9900;margin:0;font-size:1.4em;">AWS Cloud Practitioner — Exam Results</h1>
+        </div>
+        <div style="padding:20px 24px;border:1px solid #e5e7eb;border-top:none;">
+            <h2 style="color:{status_color};margin-top:0;">{status_text} — {score['correct']}/{score['total']} ({score['percent']}%)</h2>
+            <p>Time used: {format_mmss(time_taken)}</p>
+
+            <h3>Score by Domain</h3>
+            <table style="width:100%;border-collapse:collapse;margin-bottom:20px;">
+                {domain_rows}
+            </table>
+
+            <h3>Answer Review</h3>
+            {review_rows}
+
+            <p style="margin-top:20px;color:#9ca3af;font-size:0.8em;">
+                Generated by the AWS Cloud Practitioner Exam Simulator (Streamlit app).
+            </p>
+        </div>
+    </body>
+    </html>
+    """
+
+
+def send_results_email(score, time_taken, questions, answers):
+    """Send the scored results to RESULTS_RECIPIENT_EMAIL. Returns (ok, message)."""
+    sender, app_password = get_email_credentials()
+    if not sender or not app_password:
+        return False, (
+            "Email credentials are not configured. Set `EMAIL_ADDRESS` / `EMAIL_APP_PASSWORD` "
+            "environment variables, or add an `[email]` section with `address` and `app_password` "
+            "to `.streamlit/secrets.toml`."
+        )
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = (
+        f"AWS Cloud Practitioner Exam Results — {score['percent']}% "
+        f"({'PASS' if score['passed'] else 'FAIL'})"
+    )
+    msg["From"] = sender
+    msg["To"] = RESULTS_RECIPIENT_EMAIL
+
+    msg.attach(MIMEText(build_results_text(score, time_taken, questions, answers), "plain"))
+    msg.attach(MIMEText(build_results_html(score, time_taken, questions, answers), "html"))
+
+    try:
+        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=20) as server:
+            server.login(sender, app_password)
+            server.sendmail(sender, RESULTS_RECIPIENT_EMAIL, msg.as_string())
+        return True, f"Results emailed to {RESULTS_RECIPIENT_EMAIL}."
+    except Exception as exc:
+        return False, f"Failed to send results email: {exc}"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -962,15 +1136,43 @@ def render_start():
     with col1:
         st.subheader("Before you begin")
         st.markdown(
-            """
+            f"""
             - **65 questions**, each with 4 answer choices — this mirrors the real CLF-C02 exam length.
-            - **90-minute countdown timer.** The exam auto-submits the moment time runs out.
+            - **90-minute countdown timer** shown on screen. The exam auto-submits the moment time runs out.
             - Use **Next / Previous** to move between questions, or jump directly using the question grid in the sidebar once the exam starts.
             - **Mark for Review** flags a question so you can revisit it before submitting.
             - You can submit early at any time once you're confident in your answers.
             - Questions and answer order are shuffled on every attempt.
+            - **Your score is not shown on screen.** When you submit, results are scored and emailed to **{RESULTS_RECIPIENT_EMAIL}**.
             """
         )
+
+        sender, app_password = get_email_credentials()
+        with st.expander("📧 Email setup (required before your first exam)"):
+            if sender and app_password:
+                st.success(f"Email is configured to send from {sender}.")
+            else:
+                st.warning("Email credentials are not configured yet — results can't be sent until this is set up.")
+            st.markdown(
+                f"""
+                Results are sent via Gmail SMTP from **philjones820@gmail.com**. To enable it, generate a
+                [Gmail App Password](https://myaccount.google.com/apppasswords) for that account, then provide it
+                to the app one of two ways:
+
+                **Option A — Streamlit secrets** (create `.streamlit/secrets.toml`, keep it out of git):
+                ```toml
+                [email]
+                address = "philjones820@gmail.com"
+                app_password = "xxxx xxxx xxxx xxxx"
+                ```
+
+                **Option B — environment variables** before launching the app:
+                ```bash
+                export EMAIL_ADDRESS="philjones820@gmail.com"
+                export EMAIL_APP_PASSWORD="xxxx xxxx xxxx xxxx"
+                ```
+                """
+            )
         st.subheader("Exam domain breakdown")
         for domain, pct in DOMAIN_WEIGHTS.items():
             st.markdown(f"**{domain}** — {pct}%")
@@ -1158,70 +1360,47 @@ def render_exam():
 def render_results():
     questions = st.session_state.exam_questions
     answers = st.session_state.answers
-    total = len(questions)
-    correct = sum(1 for i, q in enumerate(questions) if answers.get(i) == q["answer"])
-    percent = round((correct / total) * 100, 1)
-    passed = percent >= PASS_THRESHOLD_PERCENT
     time_taken = min(elapsed_seconds(), EXAM_DURATION_SECONDS)
+    score = score_exam(questions, answers)
+
+    if st.session_state.email_status is None:
+        with st.spinner("Scoring your exam and emailing your results..."):
+            ok, message = send_results_email(score, time_taken, questions, answers)
+        st.session_state.email_status = {"ok": ok, "message": message}
+
+    status = st.session_state.email_status
 
     st.markdown(
-        f"""
+        """
         <div class="exam-header">
-            <h1>{'✅ PASS' if passed else '❌ NOT YET PASSING'} — Exam Results</h1>
-            <p>You scored {correct}/{total} ({percent}%) in {format_mmss(time_taken)}</p>
+            <h1>🏁 Exam Submitted</h1>
+            <p>Your answers have been scored. Results are not shown on screen.</p>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Score", f"{correct}/{total}")
-    c2.metric("Percentage", f"{percent}%")
-    c3.metric("Time Used", format_mmss(time_taken))
-    c4.metric("Result", "PASS" if passed else "FAIL", delta=f"{percent - PASS_THRESHOLD_PERCENT:+.1f} pts vs {PASS_THRESHOLD_PERCENT}%")
-
-    st.markdown("### Score by Domain")
-    domain_stats = {d: {"correct": 0, "total": 0} for d in DOMAIN_WEIGHTS}
-    for i, q in enumerate(questions):
-        d = q["domain"]
-        domain_stats[d]["total"] += 1
-        if answers.get(i) == q["answer"]:
-            domain_stats[d]["correct"] += 1
-
-    for domain, stats in domain_stats.items():
-        pct = (stats["correct"] / stats["total"] * 100) if stats["total"] else 0
-        st.markdown(f"**{domain}** — {stats['correct']}/{stats['total']} ({pct:.0f}%)")
-        st.progress(pct / 100)
-
-    st.markdown("---")
-    st.markdown("### Answer Review")
-    filter_choice = st.radio(
-        "Show:", ["All questions", "Incorrect only", "Unanswered only"], horizontal=True
-    )
-
-    for i, q in enumerate(questions):
-        user_answer = answers.get(i)
-        is_correct = user_answer == q["answer"]
-        is_unanswered = user_answer is None
-
-        if filter_choice == "Incorrect only" and (is_correct or is_unanswered):
-            continue
-        if filter_choice == "Unanswered only" and not is_unanswered:
-            continue
-
-        icon = "✅" if is_correct else ("⬜" if is_unanswered else "❌")
-        with st.expander(f"{icon} Q{i + 1} — {q['domain']}: {q['question'][:80]}..."):
-            st.markdown(f"**{q['question']}**")
-            for opt_i, opt_text in enumerate(q["options"]):
-                prefix = ""
-                if opt_i == q["answer"]:
-                    prefix = "✅ **Correct answer:** "
-                elif opt_i == user_answer:
-                    prefix = "❌ **Your answer:** "
-                st.markdown(f"{prefix}{opt_text}")
-            if is_unanswered:
-                st.info("You did not answer this question.")
-            st.caption(f"💡 {q['explanation']}")
+    if status["ok"]:
+        st.success(f"✅ {status['message']}")
+        st.caption(f"Time used: {format_mmss(time_taken)} · Questions answered: {len(answers)}/{len(questions)}")
+    else:
+        st.error(f"⚠️ {status['message']}")
+        st.info("Fix the email configuration above, then click below to try sending again.")
+        if st.button("📧 Retry sending email"):
+            st.session_state.email_status = None
+            st.rerun()
+        with st.expander("Trouble with email delivery? View results on screen instead"):
+            if st.button("Show my results now"):
+                st.session_state.reveal_results = True
+                st.rerun()
+            if st.session_state.reveal_results:
+                st.markdown(
+                    f"**Score:** {score['correct']}/{score['total']} ({score['percent']}%) "
+                    f"— {'PASS' if score['passed'] else 'FAIL'}"
+                )
+                for domain, stats in score["domain_stats"].items():
+                    pct = (stats["correct"] / stats["total"] * 100) if stats["total"] else 0
+                    st.markdown(f"- **{domain}** — {stats['correct']}/{stats['total']} ({pct:.0f}%)")
 
     st.markdown("---")
     if st.button("🔄 Retake Exam", type="primary"):
