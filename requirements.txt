@@ -1,6 +1,9 @@
 # Minimal requirements for basic functionality
 anthropic
 streamlit
+
+# Cybersecurity Review Agent (cybersecurity_agent_app.py) uses only the
+# standard library plus anthropic/streamlit above -- no extra deps.
 huggingface-hub
 huggingface_hub
 python-dotenv
