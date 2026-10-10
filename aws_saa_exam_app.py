@@ -14,8 +14,13 @@ AWS Certified Solutions Architect – Associate (SAA-C03) Simulated Exam
 Run:
     streamlit run aws_saa_exam_app.py
 
-Settings (e-mail, instructor password, results mode) come from Streamlit secrets
-(.streamlit/secrets.toml) or environment variables. See .streamlit/secrets.toml.example.
+Settings (e-mail, instructor password, results mode, Google Sheets storage) come from
+Streamlit secrets (.streamlit/secrets.toml) or environment variables.
+See .streamlit/secrets.toml.example.
+
+Storage: submissions go to a Google Sheet when [gcp_service_account] and GSHEET_URL are
+set (required on Streamlit Community Cloud, whose disk is wiped on restart); otherwise
+they are saved as local JSON files in ./exam_submissions.
 """
 
 import csv
@@ -83,15 +88,14 @@ def normalize_name(name):
 
 
 # ─────────────────────────────────────────────────────────────
-# SUBMISSION STORAGE (one JSON file per submission)
+# SUBMISSION STORAGE
+#   Google Sheets when [gcp_service_account] and GSHEET_URL are configured
+#   (survives Streamlit Community Cloud restarts), otherwise one local JSON
+#   file per submission.
 # ─────────────────────────────────────────────────────────────
 
-def save_submission(sub):
-    SUBMISSIONS_DIR.mkdir(parents=True, exist_ok=True)
-    path = SUBMISSIONS_DIR / f"{sub['id']}.json"
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(sub, indent=2))
-    tmp.replace(path)  # atomic write
+SHEET_HEADER = ["ID", "Student", "Email", "Submitted", "Score", "Result",
+                "Status", "Retake allowed", "Feedback", "Data (do not edit)"]
 
 
 def _from_json(sub):
@@ -101,25 +105,101 @@ def _from_json(sub):
     return sub
 
 
-def load_submission(sub_id):
-    path = SUBMISSIONS_DIR / f"{sub_id.strip().upper()}.json"
-    if not sub_id.strip().isalnum() or not path.exists():
-        return None
-    return _from_json(json.loads(path.read_text()))
+def sheets_configured():
+    try:
+        return "gcp_service_account" in st.secrets and bool(get_setting("GSHEET_URL"))
+    except Exception:
+        return False
+
+
+@st.cache_resource(show_spinner=False)
+def get_worksheet():
+    import gspread  # only needed when Google Sheets storage is configured
+
+    client = gspread.service_account_from_dict(dict(st.secrets["gcp_service_account"]))
+    sheet = client.open_by_url(get_setting("GSHEET_URL"))
+    ws = sheet.sheet1
+    if ws.row_values(1) != SHEET_HEADER:
+        ws.update(range_name="A1", values=[SHEET_HEADER])
+        ws.freeze(rows=1)
+    return ws
+
+
+def _sheet_row(sub):
+    r = grade(sub)
+    return [
+        sub["id"], sub["name"], sub["email"],
+        datetime.fromtimestamp(sub["finished"]).strftime("%Y-%m-%d %H:%M"),
+        r["score"], "PASS" if r["passed"] else "FAIL",
+        sub["status"], "Yes" if sub.get("retake_allowed") else "No",
+        sub.get("feedback", ""), json.dumps(sub, separators=(",", ":")),
+    ]
+
+
+def _sub_from_row(row):
+    row = row + [""] * (len(SHEET_HEADER) - len(row))
+    sub = _from_json(json.loads(row[9]))
+    # Status, retake and feedback columns may be edited directly in the sheet, so they win.
+    sub["status"] = "released" if row[6].strip().lower() == "released" else "locked"
+    sub["retake_allowed"] = row[7].strip().lower() in ("yes", "true", "y")
+    sub["feedback"] = row[8]
+    return sub
+
+
+def save_submission(sub):
+    if sheets_configured():
+        ws = get_worksheet()
+        values = _sheet_row(sub)
+        ids = ws.col_values(1)
+        if sub["id"] in ids:
+            ws.update(range_name=f"A{ids.index(sub['id']) + 1}", values=[values], raw=True)
+        else:
+            ws.append_row(values, value_input_option="RAW")
+        return
+    _save_local(sub)
+
+
+def _save_local(sub):
+    SUBMISSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    path = SUBMISSIONS_DIR / f"{sub['id']}.json"
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(sub, indent=2))
+    tmp.replace(path)  # atomic write
 
 
 def load_all_submissions():
-    if not SUBMISSIONS_DIR.exists():
-        return []
-    subs = [_from_json(json.loads(p.read_text())) for p in SUBMISSIONS_DIR.glob("*.json")]
+    if sheets_configured():
+        subs = [_sub_from_row(row) for row in get_worksheet().get_all_values()[1:] if row and row[0]]
+    elif SUBMISSIONS_DIR.exists():
+        subs = [_from_json(json.loads(p.read_text())) for p in SUBMISSIONS_DIR.glob("*.json")]
+    else:
+        subs = []
     return sorted(subs, key=lambda s: s["finished"], reverse=True)
 
 
+def load_submission(sub_id):
+    sub_id = sub_id.strip().upper()
+    if not sub_id.isalnum():
+        return None
+    if sheets_configured():
+        return next((s for s in load_all_submissions() if s["id"] == sub_id), None)
+    path = SUBMISSIONS_DIR / f"{sub_id}.json"
+    return _from_json(json.loads(path.read_text())) if path.exists() else None
+
+
 def new_submission_id():
+    existing = {s["id"] for s in load_all_submissions()}
     while True:
         sub_id = secrets.token_hex(3).upper()
-        if not (SUBMISSIONS_DIR / f"{sub_id}.json").exists():
+        if sub_id not in existing:
             return sub_id
+
+
+def _safe_new_submission_id():
+    try:
+        return new_submission_id()
+    except Exception:  # storage unreachable; collisions are vanishingly unlikely
+        return secrets.token_hex(4).upper()
 
 
 def find_blocking_submission(name):
@@ -203,6 +283,7 @@ def init_state():
         "current": 0,
         "start_time": None,
         "submission_id": None,
+        "submission": None,
         "email_status": None,
         "confirm_submit": False,
         "instructor_ok": False,
@@ -250,7 +331,7 @@ def submit_exam(auto=False):
     if ss.stage != "exam":
         return
     sub = {
-        "id": new_submission_id(),
+        "id": _safe_new_submission_id(),
         "name": ss.student_name,
         "email": ss.student_email,
         "started": ss.start_time,
@@ -265,7 +346,13 @@ def submit_exam(auto=False):
         "feedback": "",
         "retake_allowed": not INSTRUCTOR_MODE,
     }
-    save_submission(sub)
+    try:
+        save_submission(sub)
+    except Exception as exc:
+        # Never lose an attempt: keep a local copy; the instructor e-mail also carries the full results.
+        _save_local(sub)
+        sub["storage_error"] = str(exc)
+    ss.submission = sub
     ss.submission_id = sub["id"]
     ss.stage = "submitted"
     ss.email_status = send_results_email(sub)
@@ -315,6 +402,8 @@ def build_email(sub, result):
         f"Submission:     {submitted}",
         "",
         lock_note,
+        *([f"WARNING: could not save to the results database ({sub['storage_error']}). "
+           "This e-mail is the record of the attempt."] if sub.get("storage_error") else []),
         "",
         f"Scaled score:   {result['score']} / 1000 (passing {PASSING_SCORE}) -> {status}",
         f"Raw score:      {result['correct']} / {result['total']} correct, {result['answered']} answered",
@@ -448,11 +537,16 @@ def render_start():
         agree = st.checkbox("I understand the timer starts as soon as I begin and cannot be paused.")
         submitted = st.form_submit_button("🚀 Start exam", type="primary")
     if submitted:
+        try:
+            blocking = find_blocking_submission(name) if INSTRUCTOR_MODE and name.strip() else None
+        except Exception as exc:
+            st.error(f"Could not reach the results database, please try again in a moment. ({exc})")
+            return
         if not name.strip():
             st.error("Please enter your name.")
         elif not agree:
             st.error("Please confirm you understand the timer rules.")
-        elif INSTRUCTOR_MODE and (blocking := find_blocking_submission(name)):
+        elif blocking:
             st.error(
                 f"🔒 You have already submitted this exam (submission **{blocking['id']}**, "
                 f"{datetime.fromtimestamp(blocking['finished']):%Y-%m-%d %H:%M}). "
@@ -627,10 +721,7 @@ def render_exam():
 # ─────────────────────────────────────────────────────────────
 
 def render_submitted():
-    sub = load_submission(st.session_state.submission_id)
-    if sub is None:
-        st.error("Submission not found.")
-        return
+    sub = st.session_state.submission
     if sub["status"] == "released":
         render_result_view(sub, for_instructor=False)
         if not INSTRUCTOR_MODE and st.button("🔁 Take the exam again"):
@@ -666,7 +757,11 @@ def render_check_results():
         go = st.form_submit_button("Check")
     if not go:
         return
-    sub = load_submission(sub_id) if sub_id.strip() else None
+    try:
+        sub = load_submission(sub_id) if sub_id.strip() else None
+    except Exception:
+        st.error("Could not reach the results database, please try again in a moment.")
+        return
     if sub is None or normalize_name(sub["name"]) != normalize_name(name):
         st.error("No submission matches that ID and name.")
     elif sub["status"] != "released":
@@ -761,7 +856,13 @@ def render_instructor():
         st.session_state.instructor_ok = False
         st.rerun()
 
-    subs = load_all_submissions()
+    st.caption("Storage: " + ("Google Sheets — " + str(get_setting("GSHEET_URL")) if sheets_configured()
+                              else f"local files in {SUBMISSIONS_DIR} (lost on Streamlit Cloud restarts)"))
+    try:
+        subs = load_all_submissions()
+    except Exception as exc:
+        st.error(f"Could not load submissions: {exc}")
+        return
     if not subs:
         st.info("No submissions yet.")
         return

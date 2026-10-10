@@ -1,6 +1,7 @@
 # Minimal requirements for basic functionality
 anthropic
-streamlit
+streamlit>=1.37
+gspread>=6.0
 huggingface-hub
 huggingface_hub
 python-dotenv
